@@ -79,7 +79,7 @@ async def monitoring_loop(ctx: commands.Context) -> None:
                 
                 if usd_price is None or stride_rate is None:
                     await ctx.send("⚠️ Errore nel recupero dati dalle API (prezzo USD o Stride)")
-                    await asyncio.sleep(CHECK_INTERVAL)
+                    await asyncio.sleep(BotState.check_interval)
                     continue
                 
                 # 2. Calcola i TIA in ingresso basati sull'importo USD scelto dall'utente
@@ -89,7 +89,7 @@ async def monitoring_loop(ctx: commands.Context) -> None:
                 sttia_out = await get_osmosis_swap_rate(session, tia_in)
                 if sttia_out is None:
                     await ctx.send("⚠️ Errore nel calcolo preventivo su Osmosis (SQS API in down?)")
-                    await asyncio.sleep(CHECK_INTERVAL)
+                    await asyncio.sleep(BotState.check_interval)
                     continue
                 
                 # 4. Calcola i TIA finali dopo il redeem su Stride e il profitto
