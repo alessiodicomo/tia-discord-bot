@@ -5,6 +5,7 @@ import aiohttp
 import asyncio
 import os
 import sys
+import json
 from typing import Optional
 from keep_alive import keep_alive
 
@@ -24,11 +25,39 @@ intents.messages = True
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
+STATE_FILE = "bot_state.json"
+
 class BotState:
     current_task: Optional[asyncio.Task] = None
     usd_amount: Optional[float] = None
     alert_threshold: Optional[float] = None
     check_interval: int = 60  # secondi
+    channel_id: Optional[int] = None
+
+def save_state():
+    data = {
+        "usd_amount": BotState.usd_amount,
+        "alert_threshold": BotState.alert_threshold,
+        "check_interval": BotState.check_interval,
+        "channel_id": BotState.channel_id
+    }
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Errore salvataggio stato: {e}")
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r") as f:
+                data = json.load(f)
+                BotState.usd_amount = data.get("usd_amount")
+                BotState.alert_threshold = data.get("alert_threshold")
+                BotState.check_interval = data.get("check_interval", 60)
+                BotState.channel_id = data.get("channel_id")
+        except Exception as e:
+            print(f"Errore caricamento stato: {e}")
 
 # Async API functions
 async def get_stride_redemption_rate(session: aiohttp.ClientSession) -> Optional[float]:
@@ -69,7 +98,7 @@ async def get_osmosis_swap_rate(session: aiohttp.ClientSession, amount_tia: floa
         print(f"Errore Osmosis API: {e}")
     return None
 
-async def monitoring_loop(ctx: commands.Context) -> None:
+async def monitoring_loop(channel) -> None:
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -78,7 +107,7 @@ async def monitoring_loop(ctx: commands.Context) -> None:
                 stride_rate = await get_stride_redemption_rate(session)
                 
                 if usd_price is None or stride_rate is None:
-                    await ctx.send("⚠️ Errore nel recupero dati dalle API (prezzo USD o Stride)")
+                    await channel.send("⚠️ Errore nel recupero dati dalle API (prezzo USD o Stride)")
                     await asyncio.sleep(BotState.check_interval)
                     continue
                 
@@ -88,7 +117,7 @@ async def monitoring_loop(ctx: commands.Context) -> None:
                 # 3. Ottieni quanti stTIA riceve scambiando 'tia_in' su Osmosis
                 sttia_out = await get_osmosis_swap_rate(session, tia_in)
                 if sttia_out is None:
-                    await ctx.send("⚠️ Errore nel calcolo preventivo su Osmosis (SQS API in down?)")
+                    await channel.send("⚠️ Errore nel calcolo preventivo su Osmosis (SQS API in down?)")
                     await asyncio.sleep(BotState.check_interval)
                     continue
                 
@@ -111,7 +140,7 @@ async def monitoring_loop(ctx: commands.Context) -> None:
                 report.add_field(name="Profitto USD", value=profit_usd_str, inline=True)
                 report.add_field(name="Soglia Allarme", value=f"{BotState.alert_threshold}%", inline=False)
                 
-                await ctx.send(embed=report)
+                await channel.send(embed=report)
                 
                 print(f"[LOG] {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} | TIA Price: ${usd_price:.4f} | Stride Rate: {stride_rate:.4f} | Profit: {profit_percentage:.2f}% | USD Profit: ${profit_usd:.2f}")
                 
@@ -131,7 +160,7 @@ async def monitoring_loop(ctx: commands.Context) -> None:
                 
             except Exception as e:
                 print(f"[ERROR] Errore nel loop: {e}")
-                await ctx.send(f"❌ Errore interno al loop di monitoraggio: {e}")
+                await channel.send(f"❌ Errore interno al loop di monitoraggio: {e}")
                 break
 
 @bot.event
@@ -142,6 +171,13 @@ async def on_ready() -> None:
         await online_channel.send("🟢 Bot Arbitraggio TIA/stTIA online e operativo!")
     
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="TIA Arbitrage"))
+
+    load_state()
+    if BotState.usd_amount is not None and BotState.channel_id is not None:
+        channel = bot.get_channel(BotState.channel_id)
+        if channel and BotState.current_task is None:
+            BotState.current_task = bot.loop.create_task(monitoring_loop(channel))
+            await channel.send("🔄 Monitoraggio ripreso automaticamente dopo il riavvio del server!")
 
 @bot.command()
 async def tiastart(ctx: commands.Context) -> None:
@@ -160,7 +196,9 @@ async def tiastart(ctx: commands.Context) -> None:
         msg_threshold = await bot.wait_for('message', check=lambda m: m.author == ctx.author and m.channel == ctx.channel, timeout=30)
         BotState.alert_threshold = float(msg_threshold.content.replace(',','.'))
         
-        BotState.current_task = bot.loop.create_task(monitoring_loop(ctx))
+        BotState.channel_id = ctx.channel.id
+        save_state()
+        BotState.current_task = bot.loop.create_task(monitoring_loop(ctx.channel))
         await ctx.send(
             f"✅ Monitoraggio TIA avviato:\n"
             f"- Investimento base: ${BotState.usd_amount}\n"
@@ -178,6 +216,8 @@ async def tiastop(ctx: commands.Context) -> None:
     if BotState.current_task:
         BotState.current_task.cancel()
         BotState.current_task = None
+        BotState.usd_amount = None
+        save_state()
         await ctx.send("🛑 Monitoraggio TIA fermato")
     else:
         await ctx.send("⚠️ Nessun monitoraggio attivo")
@@ -197,6 +237,7 @@ async def setinterval(ctx: commands.Context, seconds: int) -> None:
         await ctx.send("⚠️ L'intervallo minimo è 10 secondi per non sovraccaricare le API.")
         return
     BotState.check_interval = seconds
+    save_state()
     print(f"[CONFIG] Intervallo aggiornato a {seconds} secondi.")
     await ctx.send(f"⏱️ Intervallo di controllo aggiornato a **{seconds} secondi**.")
 
