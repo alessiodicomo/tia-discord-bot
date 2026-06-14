@@ -60,6 +60,13 @@ def load_state():
             print(f"Errore caricamento stato: {e}")
 
 # Async API functions
+
+async def safe_send(channel, *args, **kwargs):
+    try:
+        await channel.send(*args, **kwargs)
+    except Exception as e:
+        print(f"[ERROR] Failed to send message to Discord: {e}")
+
 async def get_stride_redemption_rate(session: aiohttp.ClientSession) -> Optional[float]:
     try:
         async with session.get(STRIDE_API_URL, timeout=10) as response:
@@ -107,7 +114,7 @@ async def monitoring_loop(channel) -> None:
                 stride_rate = await get_stride_redemption_rate(session)
                 
                 if usd_price is None or stride_rate is None:
-                    await channel.send("⚠️ Errore nel recupero dati dalle API (prezzo USD o Stride)")
+                    await safe_send(channel, "⚠️ Errore nel recupero dati dalle API (prezzo USD o Stride)")
                     await asyncio.sleep(BotState.check_interval)
                     continue
                 
@@ -117,7 +124,7 @@ async def monitoring_loop(channel) -> None:
                 # 3. Ottieni quanti stTIA riceve scambiando 'tia_in' su Osmosis
                 sttia_out = await get_osmosis_swap_rate(session, tia_in)
                 if sttia_out is None:
-                    await channel.send("⚠️ Errore nel calcolo preventivo su Osmosis (SQS API in down?)")
+                    await safe_send(channel, "⚠️ Errore nel calcolo preventivo su Osmosis (SQS API in down?)")
                     await asyncio.sleep(BotState.check_interval)
                     continue
                 
@@ -140,7 +147,7 @@ async def monitoring_loop(channel) -> None:
                 report.add_field(name="Profitto USD", value=profit_usd_str, inline=True)
                 report.add_field(name="Soglia Allarme", value=f"{BotState.alert_threshold}%", inline=False)
                 
-                await channel.send(embed=report)
+                await safe_send(channel, embed=report)
                 
                 print(f"[LOG] {discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S')} | TIA Price: ${usd_price:.4f} | Stride Rate: {stride_rate:.4f} | Profit: {profit_percentage:.2f}% | USD Profit: ${profit_usd:.2f}")
                 
@@ -160,7 +167,7 @@ async def monitoring_loop(channel) -> None:
                 
             except Exception as e:
                 print(f"[ERROR] Errore nel loop: {e}")
-                await channel.send(f"❌ Errore interno al loop di monitoraggio: {e}")
+                await safe_send(channel, f"❌ Errore interno al loop di monitoraggio: {e}")
                 break
 
 @bot.event
@@ -175,9 +182,10 @@ async def on_ready() -> None:
     load_state()
     if BotState.usd_amount is not None and BotState.channel_id is not None:
         channel = bot.get_channel(BotState.channel_id)
-        if channel and BotState.current_task is None:
-            BotState.current_task = bot.loop.create_task(monitoring_loop(channel))
-            await channel.send("🔄 Monitoraggio ripreso automaticamente dopo il riavvio del server!")
+        if channel:
+            if BotState.current_task is None or BotState.current_task.done():
+                BotState.current_task = bot.loop.create_task(monitoring_loop(channel))
+                await channel.send("🔄 Monitoraggio ripreso automaticamente!")
 
 @bot.command()
 async def tiastart(ctx: commands.Context) -> None:
