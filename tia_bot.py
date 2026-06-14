@@ -276,7 +276,7 @@ async def restart(ctx: commands.Context) -> None:
         BotState.current_task.cancel()
     
     await bot.close()
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+    sys.exit(0)
 
 @bot.command()
 async def help(ctx: commands.Context) -> None:
